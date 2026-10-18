@@ -2,8 +2,8 @@
 
 A small, single-binary dynamic DNS (DDNS) updater for **Cloudflare**, written in Go.
 
-Each time it runs, `ddns` detects the machine's current public IPv4 address and makes sure one or more
-Cloudflare DNS **A records** point to it — creating the record if it does not exist, updating it if the IP
+Each time it runs, `ddns` detects the machine's current public IPv4 address (and optionally IPv6) and
+makes sure one or more Cloudflare DNS **A** (and optionally **AAAA**) records point to it — creating the record if it does not exist, updating it if the IP
 changed, and doing nothing if it is already up to date. It is designed for home servers, NAS boxes and
 other hosts on a residential connection whose public IP changes from time to time.
 
@@ -12,10 +12,14 @@ other hosts on a residential connection whose public IP changes from time to tim
 - **One-shot run**: detects the IP, syncs the records, then exits. Schedule it with cron or a systemd
   timer to run periodically.
 - **Multiple hostnames** in a single Cloudflare zone, configured in one `config.yaml`.
-- **Create, update or skip**: missing A records are created; records with a different IP are updated;
-  records that already match are left untouched (no unnecessary API writes).
-- **Public IP detection with fallback**: tries `https://api.ipify.org`, then `https://ipv4.icanhazip.com`,
-  then `https://ifconfig.me/ip` (8-second timeout each), using the first non-empty answer.
+- **Short names**: `home` or `@` are expanded to `home.example.com` / `example.com` using the zone name.
+- **Create, update or skip**: missing records are created; records with a different IP are updated
+  (every matching record, if there are duplicates); records that already match are left untouched.
+- **Optional IPv6**: set `ipv6: true` to also manage AAAA records.
+- **Configurable TTL and proxy status**, preserving the existing values when not configured.
+- **Validated public IP detection with fallback**: IPv4 is looked up over IPv4-only connections from
+  `https://api.ipify.org`, then `https://ipv4.icanhazip.com`, then `https://ifconfig.me/ip`. A response
+  is accepted only if it is HTTP 200 and parses as an IPv4 address; otherwise the next service is tried.
 - **Interactive setup**: `ddns init` asks for the token, zone ID and hostnames and writes `config.yaml`
   with `0600` permissions.
 - **Boot-friendly**: if `config.yaml` does not exist, it logs a message and exits successfully, so it is
@@ -32,6 +36,8 @@ other hosts on a residential connection whose public IP changes from time to tim
   *Overview* page in the Cloudflare dashboard).
 - A Cloudflare **API token** with the permission **Zone → DNS → Edit**, scoped to that zone
   (`ddns` lists, creates and updates DNS records). The dashboard's "Edit zone DNS" template is sufficient.
+  Adding **Zone → Zone → Read** lets `ddns` look up the zone name to expand short names such as `home`
+  or `@`; without it, write hostnames as fully qualified names.
 - Outbound HTTPS access to the Cloudflare API and to the IP-detection services listed above.
 
 ## Build
@@ -64,10 +70,10 @@ You will be prompted for:
 
 1. `Cloudflare API Token`
 2. `Zone ID`
-3. The DNS names to update, comma-separated (for example `home.example.com,nas.example.com`)
+3. The DNS names to update, comma-separated (for example `home.example.com,nas,@`)
 
 All three are required. The file is written to `./config.yaml` with mode `0600` (overwriting any existing
-one).
+one). The optional settings below can then be added by hand.
 
 ### Option 2: write the file by hand
 
@@ -76,33 +82,45 @@ api_token: "your-cloudflare-api-token"
 zone_id: "your-zone-id"
 hostnames:
   - home.example.com
-  - nas.example.com
+  - nas            # expanded to nas.example.com
+  - "@"            # the zone apex, example.com
+
+# Optional (defaults shown in the table below)
+ipv6: false
+ttl: 1
+proxied: false
 ```
 
-| Key         | Type            | Description                                              |
-|-------------|-----------------|----------------------------------------------------------|
-| `api_token` | string          | Cloudflare API token with Zone → DNS → Edit permission.  |
-| `zone_id`   | string          | ID of the Cloudflare zone that contains the hostnames.   |
-| `hostnames` | list of strings | DNS names whose A record should point to this host's IP. |
+| Key         | Type            | Required | Description |
+|-------------|-----------------|----------|-------------|
+| `api_token` | string          | yes      | Cloudflare API token with Zone → DNS → Edit permission. |
+| `zone_id`   | string          | yes      | ID of the Cloudflare zone that contains the hostnames. |
+| `hostnames` | list of strings | yes      | DNS names to point at this host. Full names, short names (`home`) or `@`. |
+| `ipv6`      | bool            | no       | Also detect the public IPv6 address and manage AAAA records. Default `false`. |
+| `ttl`       | int             | no       | `1` (Cloudflare "Auto") or 30–86400 seconds. If unset: `1` for new records, existing TTL kept on update. |
+| `proxied`   | bool            | no       | Cloudflare proxy ("orange cloud"). If unset: `false` for new records, existing value kept on update. |
 
-All keys are required; if any is missing or empty, `ddns` exits with an error asking you to run `init`
-again.
+If a required key is missing or empty, or `ttl` is out of range, `ddns` exits with an error.
+Configs written by earlier versions keep working unchanged.
 
-Use **fully qualified names** (e.g. `home.example.com`, or `example.com` for the zone apex): existing
-records are looked up by exact name match.
+**Hostname expansion**: at startup `ddns` fetches the zone name. A hostname that is `@`, equals the zone
+name, or already ends with `.<zone>` is used as is (a trailing dot is removed); anything else gets
+`.<zone>` appended, e.g. `home` → `home.example.com`. If the zone name cannot be fetched (for example the
+token lacks Zone Read), a warning is logged and hostnames are used exactly as written, so use fully
+qualified names in that case.
 
 > `config.yaml` contains your API token. Keep it private (`chmod 600 config.yaml`) and never commit it.
 
-### Record settings
+### Record behavior
 
-Records created or updated by `ddns` are always:
-
-- type `A` (IPv4 only),
-- TTL `1` (Cloudflare "Auto"),
-- **not proxied** (`proxied: false`, "DNS only"). Note that an existing proxied record will be switched to
-  DNS-only when its IP is updated.
-
-If more than one A record exists with the same name, only the first one returned by the API is updated.
+- For each hostname, `ddns` manages `A` records (and `AAAA` records when `ipv6: true`).
+- If no record of that type exists, one is created with the configured (or default) TTL and proxy status.
+- If records exist, **every** record of that type with that name is updated when its IP, or an explicitly
+  configured `ttl` / `proxied` value, differs. Otherwise it is skipped.
+- With `ipv6: true`, the IPv6 address is looked up over IPv6-only connections from
+  `https://api6.ipify.org`, `https://ipv6.icanhazip.com` and `https://ifconfig.me/ip`, and must parse as an
+  IPv6 address. If no IPv6 address can be found, AAAA records are skipped with a log message and the IPv4
+  update still proceeds.
 
 ## Usage
 
@@ -116,8 +134,8 @@ Example output:
 
 ```
 2026/10/18 22:40:00 [ddns] 目前公網 IP: 203.0.113.42
-2026/10/18 22:40:01 [ddns] 已更新 home.example.com：198.51.100.7 → 203.0.113.42
-2026/10/18 22:40:01 [ddns] nas.example.com 已是最新 IP (203.0.113.42)，略過
+2026/10/18 22:40:01 [ddns] 已更新 home.example.com (A)：198.51.100.7 → 203.0.113.42
+2026/10/18 22:40:01 [ddns] nas.example.com (A) 已是最新 IP (203.0.113.42)，略過
 2026/10/18 22:40:01 [ddns] 全部處理完成
 ```
 
@@ -130,14 +148,15 @@ Logs go to standard error with a timestamp and the `[ddns]` prefix.
 
 | Situation                                                    | Exit code |
 |--------------------------------------------------------------|-----------|
-| All hostnames processed, or at least one succeeded           | `0`       |
+| All records processed, or at least one hostname/type succeeded | `0`     |
 | `config.yaml` does not exist (nothing to do)                 | `0`       |
 | `config.yaml` is invalid or incomplete                       | `1`       |
 | Public IP could not be detected from any source              | `1`       |
+| `ttl` out of range                                           | `1`       |
 | Every hostname failed to update                              | `1`       |
 
-A failure on one hostname is logged and the remaining hostnames are still processed. All Cloudflare
-calls in one run share a 30-second timeout.
+A failure on one hostname is logged and the remaining hostnames are still processed. Cloudflare API calls
+have a 30-second timeout per hostname and record type. A failed IPv6 lookup does not cause a non-zero exit.
 
 ## Running periodically
 
@@ -192,9 +211,19 @@ journalctl -u ddns.service
 
 ## Limitations
 
-- IPv4 / A records only; AAAA (IPv6) records are not managed.
 - All hostnames must belong to a single Cloudflare zone.
-- TTL and proxy status are fixed (Auto, DNS only) and not configurable.
+- TTL and proxy settings apply to all hostnames; they cannot be set per hostname.
+- No prebuilt release binaries yet; build from source.
+
+## Development
+
+```sh
+go vet ./...
+go test ./...
+```
+
+Tests use local `httptest` servers only (no network access or Cloudflare credentials needed). CI runs
+vet, tests and a build on every push and pull request.
 
 ## Contributing
 
