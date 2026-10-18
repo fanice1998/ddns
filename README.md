@@ -222,7 +222,9 @@ go vet ./...
 go test ./...
 ```
 
-Tests use local `httptest` servers only (no network access or Cloudflare credentials needed).
+Tests use local `httptest` servers only (no network access or Cloudflare credentials needed). CI
+([`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)) runs `go vet`, `go test -race` and `go build`
+on every push to `main` and on every pull request.
 
 ## Contributing
 
