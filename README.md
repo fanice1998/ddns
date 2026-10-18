@@ -222,8 +222,7 @@ go vet ./...
 go test ./...
 ```
 
-Tests use local `httptest` servers only (no network access or Cloudflare credentials needed). CI runs
-vet, tests and a build on every push and pull request.
+Tests use local `httptest` servers only (no network access or Cloudflare credentials needed).
 
 ## Contributing
 
